@@ -1,8 +1,11 @@
 streamlit
-anthropic
 requests
 beautifulsoup4
 opencv-python-headless
 numpy
 pytesseract
 pypdf
+langchain
+langchain-openai
+transformers
+uvicorn
