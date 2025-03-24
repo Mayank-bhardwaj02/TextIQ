@@ -9,16 +9,15 @@ from pypdf import PdfReader
 import streamlit as st
 
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from langchain.llms import HuggingFacePipeline
+import anthropic
+from pydantic import BaseModel
+
 
 st.set_page_config(page_title="TEXTIQ", layout="wide")
-
-# --- CSS Styling (injected for a "similar" look) ---
 st.markdown("""
 <style>
 body {
@@ -74,43 +73,52 @@ button:hover, .stButton button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-# --- System Prompt ---
-SYSTEM_PROMPT = (
-    "You are a helpful analyzer. When given a piece of text, analyze it and provide "
-    "the following in simple language using Markdown, in under 500 words:\n"
-    "- **Main Topic:** The core subject of the text.\n"
-    "- **Key Insights:** Important ideas or findings, listed in bullet points.\n"
-    "- **Key Words:** Important terms or phrases, each explained in one simple line (6-7 words).\n\n"
-    "Ensure your analysis captures the essence and core of the content."
-)
 
-# --- Hugging Face Token ---
-hf_token = os.getenv("HF_TOKEN")
-if not hf_token:
-    st.error("HF_TOKEN environment variable not found. Please set it before running.")
-    st.stop()
-
-# --- Global Session State ---
 if "pdf_text" not in st.session_state:
     st.session_state["pdf_text"] = ""
 if "ocr_text" not in st.session_state:
     st.session_state["ocr_text"] = ""
 if "url_text" not in st.session_state:
     st.session_state["url_text"] = ""
+if "vectorstore" not in st.session_state:
+    st.session_state["vectorstore"] = None
 if "conversation_chain" not in st.session_state:
     st.session_state["conversation_chain"] = None
 if "memory" not in st.session_state:
     st.session_state["memory"] = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
-if "vectorstore" not in st.session_state:
-    st.session_state["vectorstore"] = None
 
-# --- Helper Functions ---
+SYSTEM_PROMPT = ("You are a helpful analyzer. When given a piece of text, analyze it and provide "
+                 "the following in simple language using Markdown, in under 500 words:\n"
+                 "- **Main Topic:** The core subject of the text.\n"
+                 "- **Key Insights:** Important ideas or findings, listed in bullet points.\n"
+                 "- **Key Words:** Important terms or phrases, each explained in one simple line (6-7 words).\n\n"
+                 "Ensure your analysis captures the essence and core of the content.")
+
+
+class AnthropicLLM:
+    def __init__(self, api_key: str, model: str = "claude-3-5-haiku-20241022", max_tokens: int = 500, temperature: float = 0.7):
+        self.client = anthropic.Anthropic(api_key=api_key)
+        self.model = model
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+    def __call__(self, prompt: str) -> str:
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": f"Please analyze the following:\n{prompt}"}]
+        )
+        return response.content[0].text
+
+anthropic_api_key = st.secrets["ANTHROPIC_API_KEY"]
+llm = AnthropicLLM(api_key=anthropic_api_key)
+
+
 def extract_text_from_pdf(file) -> str:
-    pdf_reader = PdfReader(file)
-    extracted_pages = []
-    for page in pdf_reader.pages:
-        extracted_pages.append(page.extract_text())
-    return "\n".join(extracted_pages)
+    reader = PdfReader(file)
+    pages = [page.extract_text() for page in reader.pages]
+    return "\n".join(pages)
 
 def extract_text_from_image(file) -> str:
     file_bytes = file.read()
@@ -118,19 +126,17 @@ def extract_text_from_image(file) -> str:
     image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    text = pytesseract.image_to_string(thresh, lang="eng")
-    return text
+    return pytesseract.image_to_string(thresh, lang="eng")
 
 def extract_text_from_url(url: str) -> str:
-    resp = requests.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for elem in soup(["script", "style"]):
-        elem.decompose()
-    raw_text = soup.get_text(separator=" ", strip=True)
-    cleaned_text = re.sub(r"\s+", " ", raw_text).strip()
-    return cleaned_text
+    r = requests.get(url)
+    soup = BeautifulSoup(r.text, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    raw = soup.get_text(separator=" ", strip=True)
+    return re.sub(r"\s+", " ", raw).strip()
 
-def update_combined_text():
+def update_combined_text() -> str:
     texts = []
     if st.session_state["pdf_text"]:
         texts.append(st.session_state["pdf_text"])
@@ -140,90 +146,71 @@ def update_combined_text():
         texts.append(st.session_state["url_text"])
     return "\n".join(texts)
 
-def analyze_text_with_gemma(text: str) -> str:
-    prompt = f"{SYSTEM_PROMPT}\nPlease analyze the following:\n{text}"
-    return llm(prompt)
-
 def update_vectorstore(combined_text: str):
     splitter = CharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     chunks = splitter.split_text(combined_text)
-    embed = OpenAIEmbeddings()
+    embed = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return FAISS.from_texts(texts=chunks, embedding=embed)
 
-# --- Load Gemma Model ---
-@st.cache_resource
-def load_gemma_model():
-    model_name = "google/gemma-3-4b-it"
-    tokenizer_os = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
-    model_os = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", use_auth_token=hf_token)
-    text_pipe = pipeline("text-generation", model=model_os, tokenizer=tokenizer_os, max_length=512, temperature=0.7, do_sample=True)
-    return HuggingFacePipeline(pipeline=text_pipe)
 
-llm = load_gemma_model()
+def update_chain():
+    combined = update_combined_text()
+    st.session_state["vectorstore"] = update_vectorstore(combined)
+    retriever = st.session_state["vectorstore"].as_retriever()
+    st.session_state["conversation_chain"] = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        memory=st.session_state["memory"],
+        retriever=retriever
+    )
 
-# --- Layout ---
+def analyze_text(text: str) -> str:
+    prompt = f"{SYSTEM_PROMPT}\nPlease analyze the following:\n{text}"
+    return llm(prompt)
+
+
+class AnalyzeRequest(BaseModel):
+    text: str = ""
+class ChatRequest(BaseModel):
+    question: str
+class URLRequest(BaseModel):
+    url: str
+
+
 st.title("TEXTIQ")
-
 st.subheader("Transform PDFs, images, and links into clear insights and interactive conversations.")
 
-# --- Upload Section ---
-with st.container():
-    st.markdown("### 1. Upload / Provide Input")
-    col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns(3)
+with col1:
+    pdf_file = st.file_uploader("Upload PDF", type=["pdf"])
+    if pdf_file:
+        st.session_state["pdf_text"] = extract_text_from_pdf(pdf_file)
+with col2:
+    image_file = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
+    if image_file:
+        st.session_state["ocr_text"] = extract_text_from_image(image_file)
+with col3:
+    url_input = st.text_input("Enter URL")
+    if url_input and st.button("Scrape URL"):
+        st.session_state["url_text"] = extract_text_from_url(url_input)
 
-    with col1:
-        pdf_file = st.file_uploader("Upload PDF", type=["pdf"])
-        if pdf_file:
-            st.session_state["pdf_text"] = extract_text_from_pdf(pdf_file)
+if st.button("Analyze"):
+    combined_text = update_combined_text()
+    update_chain()
+    analysis = analyze_text(combined_text)
+    st.markdown("**Analysis Result:**")
+    st.write(analysis)
 
-    with col2:
-        image_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
-        if image_file:
-            st.session_state["ocr_text"] = extract_text_from_image(image_file)
+st.markdown("### Chat with TEXTIQ")
+if st.session_state["conversation_chain"] is None:
+    st.info("Please click 'Analyze' first to initialize the conversation chain.")
+else:
+    user_question = st.text_input("Type your question here:")
+    if st.button("Send"):
+        update_chain()
+        result = st.session_state["conversation_chain"].invoke({"question": user_question})
+        st.markdown(f"**You:** {user_question}")
+        st.markdown(f"**TEXTIQ:** {result['answer']}")
 
-    with col3:
-        url_val = st.text_input("Enter URL")
-        if url_val:
-            if st.button("Scrape URL"):
-                st.session_state["url_text"] = extract_text_from_url(url_val)
-
-# --- Analysis Section ---
-st.markdown("### 2. Analyze the Collected Text")
-analysis_container = st.container()
-with analysis_container:
-    if st.button("Analyze"):
-        combined = update_combined_text()
-        st.session_state["vectorstore"] = update_vectorstore(combined)
-        st.session_state["conversation_chain"] = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            memory=st.session_state["memory"],
-            retriever=st.session_state["vectorstore"].as_retriever()
-        )
-        analysis = analyze_text_with_gemma(combined)
-        st.markdown("**Analysis Result:**")
-        st.write(analysis)
-
-# --- Chat Section ---
-st.markdown("### 3. Chat with TEXTIQ")
-chat_container = st.container()
-with chat_container:
-    if st.session_state["conversation_chain"] is None:
-        st.info("No conversation chain is initialized yet. Please click 'Analyze' first.")
-    else:
-        user_query = st.text_input("Type your question here...")
-        if st.button("Send"):
-            combined = update_combined_text()
-            st.session_state["vectorstore"] = update_vectorstore(combined)
-            st.session_state["conversation_chain"] = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                memory=st.session_state["memory"],
-                retriever=st.session_state["vectorstore"].as_retriever()
-            )
-            result = st.session_state["conversation_chain"].invoke({"question": user_query})
-            st.markdown(f"**You:** {user_query}")
-            st.markdown(f"**TEXTIQ:** {result['answer']}")
-
-# --- Reset Section ---
 if st.button("Reset All"):
     st.session_state["pdf_text"] = ""
     st.session_state["ocr_text"] = ""
@@ -231,5 +218,4 @@ if st.button("Reset All"):
     st.session_state["memory"].clear()
     st.session_state["vectorstore"] = None
     st.session_state["conversation_chain"] = None
-    st.success("All inputs and conversation have been reset.")
-
+    st.success("Reset successful.")
