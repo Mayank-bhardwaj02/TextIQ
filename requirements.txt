@@ -9,4 +9,5 @@ langchain
 langchain-community
 langchain-openai
 transformers
+sentence-transformers
 anthropic
