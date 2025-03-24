@@ -28,6 +28,8 @@ Welcome to **TextIQ** – your smart assistant for unlocking key information fro
 - **Legal & Compliance:** Process contracts and legal documents to highlight critical clauses and insights. ⚖️🔍
 - **Personal Use:** Organize and understand any digital text content effortlessly, from ebooks to online articles. 📚❤️
 
+## Access the app through : https://textiqproject.streamlit.app/
+
 ---
 
 ## Getting Started
