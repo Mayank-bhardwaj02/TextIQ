@@ -7,15 +7,13 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 import streamlit as st
-
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
-import anthropic
+from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
-
 
 st.set_page_config(page_title="TEXTIQ", layout="wide")
 st.markdown("""
@@ -73,7 +71,6 @@ button:hover, .stButton button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-
 if "pdf_text" not in st.session_state:
     st.session_state["pdf_text"] = ""
 if "ocr_text" not in st.session_state:
@@ -94,26 +91,13 @@ SYSTEM_PROMPT = ("You are a helpful analyzer. When given a piece of text, analyz
                  "- **Key Words:** Important terms or phrases, each explained in one simple line (6-7 words).\n\n"
                  "Ensure your analysis captures the essence and core of the content.")
 
-
-class AnthropicLLM:
-    def __init__(self, api_key: str, model: str = "claude-3-5-haiku-20241022", max_tokens: int = 500, temperature: float = 0.7):
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-    def __call__(self, prompt: str) -> str:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"Please analyze the following:\n{prompt}"}]
-        )
-        return response.content[0].text
-
 anthropic_api_key = st.secrets["ANTHROPIC_API_KEY"]
-llm = AnthropicLLM(api_key=anthropic_api_key)
-
+llm = ChatAnthropic(
+    api_key=anthropic_api_key,
+    model="claude-3-5-haiku-20241022",
+    max_tokens=500,
+    temperature=0.7
+)
 
 def extract_text_from_pdf(file) -> str:
     reader = PdfReader(file)
@@ -152,7 +136,6 @@ def update_vectorstore(combined_text: str):
     embed = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return FAISS.from_texts(texts=chunks, embedding=embed)
 
-
 def update_chain():
     combined = update_combined_text()
     st.session_state["vectorstore"] = update_vectorstore(combined)
@@ -164,9 +147,12 @@ def update_chain():
     )
 
 def analyze_text(text: str) -> str:
-    prompt = f"{SYSTEM_PROMPT}\nPlease analyze the following:\n{text}"
-    return llm(prompt)
-
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Please analyze the following:\n{text}"}
+    ]
+    response = llm.invoke(messages)
+    return response.content
 
 class AnalyzeRequest(BaseModel):
     text: str = ""
@@ -174,7 +160,6 @@ class ChatRequest(BaseModel):
     question: str
 class URLRequest(BaseModel):
     url: str
-
 
 st.title("TEXTIQ")
 st.subheader("Transform PDFs, images, and links into clear insights and interactive conversations.")
