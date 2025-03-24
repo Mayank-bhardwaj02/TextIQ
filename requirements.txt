@@ -6,6 +6,7 @@ opencv-python-headless
 pytesseract
 pypdf
 langchain
+langchain-community
 langchain-openai
 transformers
 anthropic
