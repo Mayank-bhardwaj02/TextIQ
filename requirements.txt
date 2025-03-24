@@ -12,3 +12,4 @@ transformers
 sentence-transformers
 anthropic
 faiss-cpu
+langchain-anthropic
