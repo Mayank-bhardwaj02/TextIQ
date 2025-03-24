@@ -11,3 +11,4 @@ langchain-openai
 transformers
 sentence-transformers
 anthropic
+faiss-cpu
